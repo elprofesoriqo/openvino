@@ -861,6 +861,81 @@ std::set<std::vector<element::Type>> jit_subtract_emitter::get_supported_precisi
     return {{element::f32, element::f32}, {element::i32, element::i32}};
 }
 
+/// FloorMod ///
+jit_floor_mod_emitter::jit_floor_mod_emitter(jit_generator* host, cpu_isa_t host_isa, const element::Type exec_prc) 
+    : jit_emitter(host, host_isa, exec_prc) {
+    prepare_table();
+}
+
+jit_floor_mod_emitter::jit_floor_mod_emitter(jit_generator* host, cpu_isa_t host_isa, const std::shared_ptr<ov::Node>& node)
+    : jit_emitter(host, host_isa, get_arithmetic_binary_exec_precision(node)) {
+    prepare_table();
+}
+
+size_t jit_floor_mod_emitter::get_inputs_num() const {
+    return 2;
+}
+
+size_t jit_floor_mod_emitter::aux_vecs_count() const {
+    return 1;
+}
+
+size_t jit_floor_mod_emitter::aux_fp_gprs_count() const {
+    return 0;
+}
+
+void jit_floor_mod_emitter::emit_impl(const std::vector<size_t>& in_vec_idxs, const std::vector<size_t>& out_vec_idxs) const {
+    if (host_isa_ == ov::intel_cpu::riscv64::cpu_isa_t::gv) {
+        emit_isa<ov::intel_cpu::riscv64::cpu_isa_t::gv>(in_vec_idxs, out_vec_idxs);
+    } else {
+        OPENVINO_THROW("Can't create jit eltwise kernel");
+    }
+}
+
+template <ov::intel_cpu::riscv64::cpu_isa_t isa>
+void jit_floor_mod_emitter::emit_isa(const std::vector<size_t>& in_vec_idxs, const std::vector<size_t>& out_vec_idxs) const {
+    VReg src0 = VReg(in_vec_idxs[0]);
+    VReg src1 = VReg(in_vec_idxs[1]);
+    VReg dst = VReg(out_vec_idxs[0]);
+    VReg tmp = VReg(aux_vec_idxs[0]);
+    
+    // FloorMod(x, y) = x - floor(x / y) * y
+    // 1. Compute x / y
+    h->vfdiv_vv(tmp, src0, src1);
+    
+    // 2. Compute floor(x / y)
+    h->vfclass_v(v0, tmp);         // Check for special cases (NaN, Inf, etc.)
+    h->vmfge_vf(v0, tmp, 0.0f);    // Set mask for values >= 0 (positive or zero)
+    
+    h->vfrec_v(tmp, tmp);          // Floor for positive numbers is easy - truncate
+    h->vfcvt_x_f_v(tmp, tmp);      // Convert to integer (truncate)
+    h->vfcvt_f_x_v(tmp, tmp);      // Convert back to float
+    
+    // For negative numbers not exactly divisible, we need to subtract 1
+    h->vfclass_v(v0, tmp);         // Get classification bits
+    h->li(p_table, 0x01);          // Bit mask for negative numbers
+    h->vrgather_vi(v0, v0, 2);     // Check if negative (bit 2)
+    h->vand_vx(v0, v0, p_table);   // Extract the negative bit
+    h->vmseq_vx(v0, v0, 1);        // Set mask if negative
+    
+    // Subtract 1 from negative numbers
+    h->vmerge_vf(tmp, v0, tmp, -1.0f);
+    
+    // 3. Compute floor(x / y) * y
+    h->vfmul_vv(tmp, tmp, src1);
+    
+    // 4. Compute final result: x - floor(x / y) * y
+    h->vfsub_vv(dst, src0, tmp);
+}
+
+void jit_floor_mod_emitter::register_table_entries() {
+    // No table entries needed for this implementation
+}
+
+std::set<std::vector<element::Type>> jit_floor_mod_emitter::get_supported_precisions(const std::shared_ptr<ov::Node>& node) {
+    return {{element::f32, element::f32}};
+}
+
 #undef CONST_1_F
 
 }  // ov::intel_cpu::riscv64
